@@ -64,6 +64,7 @@ from chia.full_node.subscriptions import PeerSubscriptions, peers_for_spend_bund
 from chia.full_node.sync_store import Peak, SyncStore
 from chia.full_node.tx_processing_queue import PeerWithTx, TransactionQueue, TransactionQueueEntry
 from chia.full_node.weight_proof import WeightProofHandler
+from chia.full_node.xkv8_miner import Xkv8MinerService, Xkv8PeakEvent
 from chia.protocols import farmer_protocol, full_node_protocol, timelord_protocol, wallet_protocol
 from chia.protocols.farmer_protocol import SignagePointSourceData, SPSubSlotSourceData, SPVDFSourceData
 from chia.protocols.full_node_protocol import RequestBlocks, RespondBlock, RespondBlocks, RespondSignagePoint
@@ -170,6 +171,7 @@ class FullNode:
     bad_peak_cache: dict[bytes32, uint32] = dataclasses.field(default_factory=dict)
     wallet_sync_task: asyncio.Task[None] | None = None
     _bls_cache: BLSCache = dataclasses.field(default_factory=lambda: BLSCache(50000))
+    _xkv8_miner: Xkv8MinerService | None = None
 
     @property
     def server(self) -> ChiaServer:
@@ -294,6 +296,15 @@ class FullNode:
                 self._transaction_queue_task: asyncio.Task[None] = create_referenced_task(self._handle_transactions())
 
                 self._init_weight_proof = create_referenced_task(self.initialize_weight_proof())
+                self._xkv8_miner = Xkv8MinerService.create_if_enabled(
+                    config=self.config,
+                    coin_store=self.coin_store,
+                    add_transaction=self.add_transaction,
+                    genesis_challenge=self.constants.AGG_SIG_ME_ADDITIONAL_DATA,
+                    logger=self.log,
+                )
+                if self._xkv8_miner is not None:
+                    self._xkv8_miner.start()
 
                 if self.config.get("enable_profiler", False):
                     create_referenced_task(profile_task(self.root_path, "node", self.log), known_unreferenced=True)
@@ -362,6 +373,8 @@ class FullNode:
                         yield
                 finally:
                     self._shut_down = True
+                    if self._xkv8_miner is not None:
+                        await self._xkv8_miner.stop()
                     if self._init_weight_proof is not None:
                         self._init_weight_proof.cancel()
 
@@ -1695,6 +1708,7 @@ class FullNode:
                         agg_state_change_summary.removals + state_change_summary.removals,
                         agg_state_change_summary.additions + state_change_summary.additions,
                         agg_state_change_summary.new_rewards + state_change_summary.new_rewards,
+                        agg_state_change_summary.previous_peak_height,
                     )
             elif result in {AddBlockResult.INVALID_BLOCK, AddBlockResult.DISCONNECTED_BLOCK}:
                 if error is not None:
@@ -1875,6 +1889,16 @@ class FullNode:
         record = state_change_summary.peak
         sub_slot_iters, difficulty = self.blockchain.get_next_sub_slot_iters_and_difficulty(record.header_hash, False)
 
+        previous_peak_height = state_change_summary.previous_peak_height
+        if previous_peak_height is not None and record.height > previous_peak_height:
+            self.log.info(
+                "Peak blockchain height advanced: height=%s previous_height=%s header_hash=%s fork_height=%s",
+                record.height,
+                previous_peak_height,
+                record.header_hash,
+                state_change_summary.fork_height,
+            )
+
         self.log.info(
             f"🌱 Updated peak to height {record.height}, weight {record.weight}, "
             f"hh {record.header_hash.hex()}, "
@@ -1960,6 +1984,23 @@ class FullNode:
         # Update the mempool (returns successful pending transactions added to the mempool)
         spent_coins: list[bytes32] = [coin_id for coin_id, _ in state_change_summary.removals]
         mempool_new_peak_result = await self.mempool_manager.new_peak(self.blockchain.get_tx_peak(), spent_coins)
+
+        if (
+            self._xkv8_miner is not None
+            and previous_peak_height is not None
+            and record.height > previous_peak_height
+        ):
+            self._xkv8_miner.notify_peak(
+                Xkv8PeakEvent(
+                    height=record.height,
+                    tx_height=record.height if record.is_transaction_block else record.prev_transaction_block_height,
+                    header_hash=record.header_hash,
+                    fork_height=state_change_summary.fork_height,
+                    is_transaction_block=record.is_transaction_block,
+                    removals=list(state_change_summary.removals),
+                    additions=list(state_change_summary.additions),
+                )
+            )
 
         return PeakPostProcessingResult(
             mempool_new_peak_result.spend_bundle_ids,

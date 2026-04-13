@@ -426,6 +426,14 @@ full_node:
   # mempool, organized by peak height at the time
   log_mempool: false
 
+  # Disabled by default. When enabled, the full node mines XKV8 lode CAT spends
+  # directly from peak updates and submits them to the local mempool.
+  xkv8_miner:
+    enabled: false
+    miner_secret_key: ""
+    target_address: ""
+    target_depth: 2
+
   # this is a debug and profiling facility that logs all SQLite commands to a
   # separate log file (under logging/sql.log).
   log_sqlite_cmds: False

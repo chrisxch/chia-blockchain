@@ -76,6 +76,7 @@ class StateChangeSummary:
     # new coin and hint
     additions: list[tuple[Coin, bytes | None]]
     new_rewards: list[Coin]
+    previous_peak_height: uint32 | None = None
 
 
 class BlockchainMutexPriority(enum.IntEnum):
@@ -497,6 +498,7 @@ class Blockchain:
         """
 
         peak = self.get_peak()
+        previous_peak_height = self._peak_height
         rolled_back_state: dict[bytes32, CoinRecord] = {}
 
         if genesis and peak is not None:
@@ -616,6 +618,7 @@ class Blockchain:
                 if not fork_add.is_coinbase
             ],
             [fork_add.coin for fork_add in fork_info.additions_since_fork.values() if fork_add.is_coinbase],
+            previous_peak_height,
         )
 
     def get_next_sub_slot_iters_and_difficulty(self, header_hash: bytes32, new_slot: bool) -> tuple[uint64, uint64]:
