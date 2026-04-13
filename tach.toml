@@ -70,6 +70,15 @@ depends_on = [
     "chia.protocols",
     "chia.server",
     { path = "chia.rpc", deprecated = false },
+    { path = "chia.xkv8", deprecated = false },
+]
+
+[[modules]]
+path = "chia.xkv8"
+depends_on = [
+    "chia.types",
+    "chia.util",
+    { path = "chia.wallet", deprecated = false },
 ]
 
 [[modules]]

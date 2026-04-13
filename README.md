@@ -31,6 +31,35 @@ Setting up a seeder is best left to more advanced users.
 Building Timelords and VDFs is for sophisticated users, in most environments.
 Chia Network and additional volunteers are running sufficient Timelords for consensus.
 
+## XKV8 Miner
+
+This fork includes an optional built-in miner for the [XKV8 lode CAT](https://xkv8.com). When enabled, the full node monitors peak updates and submits mining transactions directly to the local mempool -- no separate miner process needed.
+
+The miner is **disabled by default** and has no effect on normal full node operation unless explicitly turned on.
+
+### Configuration
+
+Add the following to the `full_node` section of your `~/.chia/mainnet/config/config.yaml`:
+
+```yaml
+full_node:
+  xkv8_miner:
+    enabled: true
+    miner_secret_key: "<your-secret-key-hex>"
+    target_address: "<your-xch-receive-address>"
+    target_depth: 2
+```
+
+| Option | Description |
+|---|---|
+| `enabled` | Set to `true` to activate the miner. Default: `false`. |
+| `miner_secret_key` | 64-character hex string used to sign mining transactions. Does not need to be a wallet. |
+| `target_address` | XCH address where mined rewards are sent. |
+| `target_depth` | How many blocks ahead to pre-build mining transactions (1-4). Default: `2`. |
+
+The secret key is a seed used to generate your miner private/public keypair. Private key is needed to sign mining transactions. Public key identifies you on the XKV8 leaderboard.
+Example to generate new: `python -c "import secrets; print(secrets.token_hex(32))"`.
+
 ## Installing
 
 Install instructions are available in the [Installation Details][link-install] section of the [Chia Docs][link-docs].
