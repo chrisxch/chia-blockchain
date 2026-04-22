@@ -357,10 +357,11 @@ class FullNode:
                 if self._xkv8_miner is not None:
                     self._xkv8_miner.start()
 
-                miner_cfg = self.config.get("xkv8_miner", {})
-                target_addr = miner_cfg.get("target_address", "")
-                if target_addr:
-                    self._allowed_xkv8_addresses = frozenset({target_addr})
+                if self._xkv8_miner is not None:
+                    network_name = self.config["selected_network"]
+                    address_prefix = self.config["network_overrides"]["config"][network_name]["address_prefix"]
+                    eph_addr = encode_puzzle_hash(self._xkv8_miner.builder.eph_inner_ph, address_prefix)
+                    self._allowed_xkv8_addresses = frozenset({eph_addr})
 
                 if self.config.get("enable_profiler", False):
                     create_referenced_task(profile_task(self.root_path, "node", self.log), known_unreferenced=True)
