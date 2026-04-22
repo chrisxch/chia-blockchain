@@ -115,7 +115,7 @@ XKV8_CURRIED_EPOCH_LENGTH_INDEX = 4
 XKV8_CURRIED_BASE_REWARD_INDEX = 5
 XKV8_CURRIED_BASE_DIFFICULTY_INDEX = 6
 XKV8_EXPECTED_CURRIED_ARG_COUNT = 7
-ObservedXkv8Entry = tuple[int, str, str]
+ObservedXkv8Entry = tuple[int, str, str, str]
 
 
 def _should_broadcast_pending_tx_early(
@@ -130,23 +130,8 @@ def _should_broadcast_pending_tx_early(
 
     return len(observed_xkv8_entries) > 0 and all(
         receiver_address in allowed_addresses
-        for _user_height, receiver_address, _miner_pubkey in observed_xkv8_entries
+        for _user_height, receiver_address, _miner_pubkey, _lode_coin_id in observed_xkv8_entries
     )
-
-
-def _coin_log_string(coin: Any) -> str:
-    return (
-        f"coin_id={coin.name().hex()}:"
-        f"parent={coin.parent_coin_info.hex()}:"
-        f"puzzle_hash={coin.puzzle_hash.hex()}:"
-        f"amount={coin.amount}"
-    )
-
-
-def _spend_bundle_coin_log_string(transaction: SpendBundle) -> str:
-    removals = ",".join(_coin_log_string(coin) for coin in transaction.removals())
-    additions = ",".join(_coin_log_string(coin) for coin in transaction.additions())
-    return f"removals=[{removals}] additions=[{additions}]"
 
 
 # This is the result of calling peak_post_processing, which is then fed into peak_post_processing_2
@@ -609,7 +594,8 @@ class FullNode:
             except Exception:
                 continue
 
-            entries.append((user_height, receiver_address, miner_pubkey))
+            lode_coin_id = coin_spend.coin.name().hex()
+            entries.append((user_height, receiver_address, miner_pubkey, lode_coin_id))
 
         return entries
 
@@ -623,12 +609,13 @@ class FullNode:
         if peak is None:
             return
 
-        for user_height, receiver_address, miner_pubkey in entries:
+        for user_height, receiver_address, miner_pubkey, lode_coin_id in entries:
             self.log.info(
-                "Observed xkv8 spend bundle at height %s: tx=%s receiver_address=%s "
+                "Observed xkv8 spend bundle at height %s: tx=%s lode_coin=%s receiver_address=%s "
                 "user_height=%s miner_pubkey=%s fee_mojos=%s",
                 peak.height,
                 spend_name,
+                lode_coin_id,
                 receiver_address,
                 user_height,
                 miner_pubkey,
@@ -3061,28 +3048,7 @@ class FullNode:
             ):
                 pending_item = self.mempool_manager.get_mempool_item(spend_name, include_pending=True)
                 if pending_item is not None:
-                    broadcast_source = "local" if peer is None else "whitelisted xkv8"
-                    user_heights = sorted(
-                        {user_height for user_height, _receiver_address, _miner_pubkey in observed_xkv8_entries}
-                    )
-                    if len(user_heights) > 0:
-                        user_heights_str = ",".join(str(user_height) for user_height in user_heights)
-                        self.log.warning(
-                            "Broadcasting %s pending transaction early: %s (%s) user_height=%s coins=%s",
-                            broadcast_source,
-                            spend_name,
-                            error.name,
-                            user_heights_str,
-                            _spend_bundle_coin_log_string(transaction),
-                        )
-                    else:
-                        self.log.warning(
-                            "Broadcasting %s pending transaction early: %s (%s) coins=%s",
-                            broadcast_source,
-                            spend_name,
-                            error.name,
-                            _spend_bundle_coin_log_string(transaction),
-                        )
+                    self.log.info("Broadcasting pending transaction early: %s (%s)", spend_name, error.name)
                     await self.broadcast_added_tx(pending_item)
             self.mempool_manager.remove_seen(spend_name)
             self.log.debug(f"Wasn't able to add transaction with id {spend_name}, status {status} error: {error}")
