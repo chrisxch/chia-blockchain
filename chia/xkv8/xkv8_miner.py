@@ -201,7 +201,11 @@ class CachedBundle:
 
 class Xkv8SpendBundleBuilder:
     def __init__(self, miner_secret_key: str, target_address: str, genesis_challenge: bytes32) -> None:
-        master_sk = AugSchemeMPL.key_gen(bytes.fromhex(miner_secret_key.removeprefix("0x")))
+        sk_bytes = bytes.fromhex(miner_secret_key.removeprefix("0x"))
+        try:
+            master_sk = PrivateKey.from_bytes(sk_bytes)
+        except ValueError:
+            master_sk = AugSchemeMPL.key_gen(sk_bytes)
         self.sk = master_sk_to_wallet_sk_unhardened(master_sk, uint32(0))
         self.pk = self.sk.get_g1()
         self.pk_bytes = bytes(self.pk)
