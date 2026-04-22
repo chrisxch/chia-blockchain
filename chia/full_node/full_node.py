@@ -2979,9 +2979,10 @@ class FullNode:
         bundle_fee_mojos = self._bundle_fee_mojos(transaction) if len(observed_xkv8_entries) > 0 else 0
         for user_height, receiver_address, miner_pubkey, lode_coin_id in observed_xkv8_entries:
             if receiver_address not in self._allowed_xkv8_addresses:
+                peer_host = peer.peer_info.host if peer is not None else "local"
                 self.log.info(
                     "Rejected xkv8 spend bundle at height %s: tx=%s lode_coin=%s receiver_address=%s "
-                    "user_height=%s miner_pubkey=%s fee_mojos=%s",
+                    "user_height=%s miner_pubkey=%s fee_mojos=%s from=%s",
                     self.mempool_manager.peak.height,
                     spend_name,
                     lode_coin_id,
@@ -2989,6 +2990,7 @@ class FullNode:
                     user_height,
                     miner_pubkey,
                     bundle_fee_mojos,
+                    peer_host,
                 )
                 return MempoolInclusionStatus.FAILED, Err.INVALID_SPEND_BUNDLE
 
