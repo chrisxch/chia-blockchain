@@ -289,7 +289,7 @@ class FullNodeAPI:
         # Ignore if syncing
         if self.full_node.sync_store.get_sync_mode():
             return None
-        spend_bundle = self.full_node.mempool_manager.get_spendbundle(request.transaction_id)
+        spend_bundle = self.full_node.mempool_manager.get_spendbundle(request.transaction_id, include_pending=True)
         if spend_bundle is None:
             return None
 

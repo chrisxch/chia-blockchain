@@ -78,6 +78,7 @@ from chia.server.node_discovery import FullNodePeers
 from chia.server.server import ChiaServer
 from chia.server.ws_connection import WSChiaConnection
 from chia.types.blockchain_format.classgroup import ClassgroupElement
+from chia.types.blockchain_format.program import Program
 from chia.types.blockchain_format.vdf import CompressibleVDFField, VDFInfo, VDFProof, validate_vdf
 from chia.types.clvm_cost import QUOTE_BYTES, QUOTE_EXECUTION_COST
 from chia.types.mempool_inclusion_status import MempoolInclusionStatus
@@ -97,6 +98,55 @@ from chia.util.path import path_from_root
 from chia.util.profiler import enable_profiler, mem_profile_task, profile_task
 from chia.util.safe_cancel_task import cancel_task_safe
 from chia.util.task_referencer import create_referenced_task
+from chia.wallet.cat_wallet.cat_utils import CAT_MOD_HASH, match_cat_puzzle
+from chia.wallet.uncurried_puzzle import uncurry_puzzle
+
+XKV8_GENESIS_HEIGHT = 8521888
+XKV8_EPOCH_LENGTH = 1_120_000
+XKV8_BASE_REWARD = 10_000
+XKV8_BASE_DIFFICULTY = 2**238
+XKV8_INNER_SOLUTION_USER_HEIGHT_INDEX = 2
+XKV8_INNER_SOLUTION_MINER_PUBKEY_INDEX = 3
+XKV8_INNER_SOLUTION_TARGET_PUZZLE_HASH_INDEX = 4
+XKV8_CURRIED_MOD_HASH_INDEX = 0
+XKV8_CURRIED_CAT_MOD_HASH_INDEX = 1
+XKV8_CURRIED_GENESIS_HEIGHT_INDEX = 3
+XKV8_CURRIED_EPOCH_LENGTH_INDEX = 4
+XKV8_CURRIED_BASE_REWARD_INDEX = 5
+XKV8_CURRIED_BASE_DIFFICULTY_INDEX = 6
+XKV8_EXPECTED_CURRIED_ARG_COUNT = 7
+ObservedXkv8Entry = tuple[int, str, str]
+
+
+def _should_broadcast_pending_tx_early(
+    received_from_peer: bool, error: Err | None, observed_xkv8_entries: Sequence[ObservedXkv8Entry],
+    allowed_addresses: frozenset[str],
+) -> bool:
+    if error not in {Err.ASSERT_HEIGHT_ABSOLUTE_FAILED, Err.ASSERT_HEIGHT_RELATIVE_FAILED}:
+        return False
+
+    if not received_from_peer:
+        return True
+
+    return len(observed_xkv8_entries) > 0 and all(
+        receiver_address in allowed_addresses
+        for _user_height, receiver_address, _miner_pubkey in observed_xkv8_entries
+    )
+
+
+def _coin_log_string(coin: Any) -> str:
+    return (
+        f"coin_id={coin.name().hex()}:"
+        f"parent={coin.parent_coin_info.hex()}:"
+        f"puzzle_hash={coin.puzzle_hash.hex()}:"
+        f"amount={coin.amount}"
+    )
+
+
+def _spend_bundle_coin_log_string(transaction: SpendBundle) -> str:
+    removals = ",".join(_coin_log_string(coin) for coin in transaction.removals())
+    additions = ",".join(_coin_log_string(coin) for coin in transaction.additions())
+    return f"removals=[{removals}] additions=[{additions}]"
 
 
 # This is the result of calling peak_post_processing, which is then fed into peak_post_processing_2
@@ -172,6 +222,7 @@ class FullNode:
     wallet_sync_task: asyncio.Task[None] | None = None
     _bls_cache: BLSCache = dataclasses.field(default_factory=lambda: BLSCache(50000))
     _xkv8_miner: Xkv8MinerService | None = None
+    _allowed_xkv8_addresses: frozenset[str] = frozenset()
 
     @property
     def server(self) -> ChiaServer:
@@ -305,6 +356,11 @@ class FullNode:
                 )
                 if self._xkv8_miner is not None:
                     self._xkv8_miner.start()
+
+                miner_cfg = self.config.get("xkv8_miner", {})
+                target_addr = miner_cfg.get("target_address", "")
+                if target_addr:
+                    self._allowed_xkv8_addresses = frozenset({target_addr})
 
                 if self.config.get("enable_profiler", False):
                     create_referenced_task(profile_task(self.root_path, "node", self.log), known_unreferenced=True)
@@ -507,6 +563,76 @@ class FullNode:
 
     def _set_state_changed_callback(self, callback: StateChangedProtocol) -> None:
         self.state_changed_callback = callback
+
+    def _is_observed_xkv8_inner_puzzle(self, inner_puzzle: Program) -> bool:
+        uncurried_inner = uncurry_puzzle(inner_puzzle)
+        inner_args = list(uncurried_inner.args.as_iter())
+        if len(inner_args) != XKV8_EXPECTED_CURRIED_ARG_COUNT:
+            return False
+
+        return (
+            bytes32(inner_args[XKV8_CURRIED_MOD_HASH_INDEX].as_atom()) == uncurried_inner.mod.get_tree_hash()
+            and bytes32(inner_args[XKV8_CURRIED_CAT_MOD_HASH_INDEX].as_atom()) == CAT_MOD_HASH
+            and inner_args[XKV8_CURRIED_GENESIS_HEIGHT_INDEX].as_int() == XKV8_GENESIS_HEIGHT
+            and inner_args[XKV8_CURRIED_EPOCH_LENGTH_INDEX].as_int() == XKV8_EPOCH_LENGTH
+            and inner_args[XKV8_CURRIED_BASE_REWARD_INDEX].as_int() == XKV8_BASE_REWARD
+            and inner_args[XKV8_CURRIED_BASE_DIFFICULTY_INDEX].as_int() == XKV8_BASE_DIFFICULTY
+        )
+
+    def _observed_xkv8_entries(self, transaction: SpendBundle) -> list[ObservedXkv8Entry]:
+        network_name = self.config["selected_network"]
+        address_prefix = self.config["network_overrides"]["config"][network_name]["address_prefix"]
+        entries: list[ObservedXkv8Entry] = []
+
+        for coin_spend in transaction.coin_spends:
+            try:
+                cat_args = match_cat_puzzle(uncurry_puzzle(coin_spend.puzzle_reveal))
+                if cat_args is None:
+                    continue
+
+                _cat_mod_hash, _tail_program_hash, cat_inner_puzzle = cat_args
+                if not self._is_observed_xkv8_inner_puzzle(cat_inner_puzzle):
+                    continue
+
+                inner_solution = Program.from_serialized(coin_spend.solution).at("f")
+                inner_solution_args = list(inner_solution.as_iter())
+                if len(inner_solution_args) <= XKV8_INNER_SOLUTION_TARGET_PUZZLE_HASH_INDEX:
+                    continue
+
+                user_height = inner_solution_args[XKV8_INNER_SOLUTION_USER_HEIGHT_INDEX].as_int()
+                miner_pubkey = inner_solution_args[XKV8_INNER_SOLUTION_MINER_PUBKEY_INDEX].as_atom().hex()
+                receiver_address = encode_puzzle_hash(
+                    bytes32(inner_solution_args[XKV8_INNER_SOLUTION_TARGET_PUZZLE_HASH_INDEX].as_atom()),
+                    address_prefix,
+                )
+            except Exception:
+                continue
+
+            entries.append((user_height, receiver_address, miner_pubkey))
+
+        return entries
+
+    def _bundle_fee_mojos(self, transaction: SpendBundle) -> int:
+        return sum(coin.amount for coin in transaction.removals()) - sum(
+            coin.amount for coin in transaction.additions()
+        )
+
+    def _log_observed_xkv8(self, spend_name: bytes32, entries: list[ObservedXkv8Entry], fee_mojos: int) -> None:
+        peak = self.mempool_manager.peak
+        if peak is None:
+            return
+
+        for user_height, receiver_address, miner_pubkey in entries:
+            self.log.info(
+                "Observed xkv8 spend bundle at height %s: tx=%s receiver_address=%s "
+                "user_height=%s miner_pubkey=%s fee_mojos=%s",
+                peak.height,
+                spend_name,
+                receiver_address,
+                user_height,
+                miner_pubkey,
+                fee_mojos,
+            )
 
     async def _handle_one_transaction(self, entry: TransactionQueueEntry) -> None:
         peer = entry.peer
@@ -2861,6 +2987,24 @@ class FullNode:
             self.mempool_manager.add_and_maybe_pop_seen(spend_name)
             return MempoolInclusionStatus.FAILED, e.code
 
+        observed_xkv8_entries = self._observed_xkv8_entries(transaction)
+        bundle_fee_mojos = self._bundle_fee_mojos(transaction) if len(observed_xkv8_entries) > 0 else 0
+        for user_height, receiver_address, miner_pubkey in observed_xkv8_entries:
+            if receiver_address not in self._allowed_xkv8_addresses:
+                self.log.warning(
+                    "Rejecting xkv8 spend bundle at height %s: tx=%s receiver_address=%s "
+                    "user_height=%s miner_pubkey=%s fee_mojos=%s coins=%s",
+                    self.mempool_manager.peak.height,
+                    spend_name,
+                    receiver_address,
+                    user_height,
+                    miner_pubkey,
+                    bundle_fee_mojos,
+                    _spend_bundle_coin_log_string(transaction),
+                )
+                return MempoolInclusionStatus.FAILED, Err.INVALID_SPEND_BUNDLE
+
+        self._log_observed_xkv8(spend_name, observed_xkv8_entries, bundle_fee_mojos)
         self.mempool_manager.add_and_maybe_pop_seen(spend_name)
 
         if self.config.get("log_mempool", False):  # pragma: no cover
@@ -2923,6 +3067,37 @@ class FullNode:
                 await self.simulator_transaction_callback(spend_name)
 
         else:
+            if (
+                status == MempoolInclusionStatus.PENDING
+                and _should_broadcast_pending_tx_early(
+                    peer is not None, error, observed_xkv8_entries, self._allowed_xkv8_addresses
+                )
+            ):
+                pending_item = self.mempool_manager.get_mempool_item(spend_name, include_pending=True)
+                if pending_item is not None:
+                    broadcast_source = "local" if peer is None else "whitelisted xkv8"
+                    user_heights = sorted(
+                        {user_height for user_height, _receiver_address, _miner_pubkey in observed_xkv8_entries}
+                    )
+                    if len(user_heights) > 0:
+                        user_heights_str = ",".join(str(user_height) for user_height in user_heights)
+                        self.log.warning(
+                            "Broadcasting %s pending transaction early: %s (%s) user_height=%s coins=%s",
+                            broadcast_source,
+                            spend_name,
+                            error.name,
+                            user_heights_str,
+                            _spend_bundle_coin_log_string(transaction),
+                        )
+                    else:
+                        self.log.warning(
+                            "Broadcasting %s pending transaction early: %s (%s) coins=%s",
+                            broadcast_source,
+                            spend_name,
+                            error.name,
+                            _spend_bundle_coin_log_string(transaction),
+                        )
+                    await self.broadcast_added_tx(pending_item)
             self.mempool_manager.remove_seen(spend_name)
             self.log.debug(f"Wasn't able to add transaction with id {spend_name}, status {status} error: {error}")
         return status, error

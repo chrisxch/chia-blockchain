@@ -832,9 +832,9 @@ class MempoolManager:
 
         return None, potential, [item.name for item in conflicts]
 
-    def get_spendbundle(self, bundle_hash: bytes32) -> SpendBundle | None:
-        """Returns a full SpendBundle if it's inside one the mempools"""
-        item: MempoolItem | None = self.mempool.get_item_by_id(bundle_hash)
+    def get_spendbundle(self, bundle_hash: bytes32, include_pending: bool = False) -> SpendBundle | None:
+        """Returns a full SpendBundle if it's inside the mempool or optionally pending caches."""
+        item = self.get_mempool_item(bundle_hash, include_pending)
         if item is not None:
             return item.to_spend_bundle()
         return None

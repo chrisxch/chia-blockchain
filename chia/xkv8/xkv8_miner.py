@@ -377,7 +377,7 @@ class Xkv8MinerService:
         if self._worker_task is None or self._worker_task.done():
             self._worker_task = create_referenced_task(self._worker())
             self.log.info(
-                "XKV8 miner enabled. Your mining pubkey: %s target_address=%s",
+                "XKV8 miner enabled (aggressive mode). Your mining pubkey: %s target_address=%s",
                 bytes(self.builder.pk).hex(),
                 self.config.get("target_address"),
             )
