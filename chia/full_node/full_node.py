@@ -2990,21 +2990,6 @@ class FullNode:
 
         observed_xkv8_entries = self._observed_xkv8_entries(transaction)
         bundle_fee_mojos = self._bundle_fee_mojos(transaction) if len(observed_xkv8_entries) > 0 else 0
-        for user_height, receiver_address, miner_pubkey in observed_xkv8_entries:
-            if receiver_address not in self._allowed_xkv8_addresses:
-                self.log.warning(
-                    "Rejecting xkv8 spend bundle at height %s: tx=%s receiver_address=%s "
-                    "user_height=%s miner_pubkey=%s fee_mojos=%s coins=%s",
-                    self.mempool_manager.peak.height,
-                    spend_name,
-                    receiver_address,
-                    user_height,
-                    miner_pubkey,
-                    bundle_fee_mojos,
-                    _spend_bundle_coin_log_string(transaction),
-                )
-                return MempoolInclusionStatus.FAILED, Err.INVALID_SPEND_BUNDLE
-
         self._log_observed_xkv8(spend_name, observed_xkv8_entries, bundle_fee_mojos)
         self.mempool_manager.add_and_maybe_pop_seen(spend_name)
 
