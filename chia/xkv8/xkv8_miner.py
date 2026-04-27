@@ -140,6 +140,27 @@ def full_cat_puzzle_hash(inner_puzzle_hash: bytes32) -> bytes32:
     )
 
 
+def _compute_lode_full_cat_puzzlehash() -> bytes32:
+    mod = Program.from_bytes(bytes.fromhex(PUZZLE_HEX))
+    inner_puzzle = mod.curry(
+        mod.get_tree_hash(),
+        CAT_MOD.get_tree_hash(),
+        CAT_TAIL_HASH,
+        GENESIS_HEIGHT,
+        EPOCH_LENGTH,
+        BASE_REWARD,
+        BASE_DIFFICULTY,
+    )
+    return full_cat_puzzle_hash(inner_puzzle.get_tree_hash())
+
+
+# The xkv8 lode coin's outer (CAT) puzzle hash is deterministic since the inner
+# puzzle is curried with constants only. The full node uses this to fast-path
+# filter inbound spend bundles in _observed_xkv8_entries before doing CLVM
+# uncurry per coin spend on the event loop thread.
+LODE_FULL_CAT_PUZZLEHASH: bytes32 = _compute_lode_full_cat_puzzlehash()
+
+
 def _grind_nonce_range(
     inner_puzzle_hash: bytes,
     miner_pubkey_bytes: bytes,

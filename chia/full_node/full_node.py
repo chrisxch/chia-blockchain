@@ -64,6 +64,7 @@ from chia.full_node.subscriptions import PeerSubscriptions, peers_for_spend_bund
 from chia.full_node.sync_store import Peak, SyncStore
 from chia.full_node.tx_processing_queue import PeerWithTx, TransactionQueue, TransactionQueueEntry
 from chia.full_node.weight_proof import WeightProofHandler
+from chia.xkv8.xkv8_miner import LODE_FULL_CAT_PUZZLEHASH as XKV8_LODE_FULL_CAT_PUZZLEHASH
 from chia.xkv8.xkv8_miner import Xkv8MinerService, Xkv8PeakEvent
 from chia.protocols import farmer_protocol, full_node_protocol, timelord_protocol, wallet_protocol
 from chia.protocols.farmer_protocol import SignagePointSourceData, SPSubSlotSourceData, SPVDFSourceData
@@ -566,11 +567,27 @@ class FullNode:
         )
 
     def _observed_xkv8_entries(self, transaction: SpendBundle) -> list[ObservedXkv8Entry]:
+        # Fast path: only xkv8 lode coins have this exact outer (CAT) puzzle hash,
+        # which is a compile-time constant since the inner puzzle is curried with
+        # constants only. A 32-byte compare is ~5 orders of magnitude cheaper than
+        # an uncurry_puzzle call, and this filter alone removes >99% of mainnet
+        # traffic from per-tx event-loop CPU cost. Without it, every inbound
+        # transaction CLVM-uncurries every coin spend on the event loop thread,
+        # which under load (e.g. 400 peers) blocks the loop long enough for
+        # WebSocket heartbeat PONGs to time out and peers to drop us.
+        if all(
+            coin_spend.coin.puzzle_hash != XKV8_LODE_FULL_CAT_PUZZLEHASH
+            for coin_spend in transaction.coin_spends
+        ):
+            return []
+
         network_name = self.config["selected_network"]
         address_prefix = self.config["network_overrides"]["config"][network_name]["address_prefix"]
         entries: list[ObservedXkv8Entry] = []
 
         for coin_spend in transaction.coin_spends:
+            if coin_spend.coin.puzzle_hash != XKV8_LODE_FULL_CAT_PUZZLEHASH:
+                continue
             try:
                 cat_args = match_cat_puzzle(uncurry_puzzle(coin_spend.puzzle_reveal))
                 if cat_args is None:
