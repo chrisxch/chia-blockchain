@@ -8,7 +8,8 @@ import os
 import random
 import time
 from collections.abc import Awaitable, Callable
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import Future, ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from functools import partial
 from typing import Any
 
@@ -93,6 +94,16 @@ def _get_pow_pool() -> ProcessPoolExecutor:
     return _pow_pool
 
 
+def _reset_pow_pool() -> None:
+    global _pow_pool
+    if _pow_pool is not None:
+        try:
+            _pow_pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        _pow_pool = None
+
+
 def int_to_clvm_bytes(n: int) -> bytes:
     if n == 0:
         return b""
@@ -156,28 +167,36 @@ def find_valid_nonce(
 ) -> int | None:
     h_bytes = int_to_clvm_bytes(user_height)
     chunk = max(1, max_attempts // NUM_WORKERS)
-    pool = _get_pow_pool()
-    futures = [
-        pool.submit(
-            _grind_nonce_range,
-            inner_puzzle_hash,
-            miner_pubkey_bytes,
-            h_bytes,
-            difficulty,
-            random.randint(0, 2**32),
-            chunk,
-        )
-        for _ in range(NUM_WORKERS)
-    ]
-
-    try:
-        for future in as_completed(futures):
-            nonce = future.result()
-            if nonce is not None:
-                return nonce
-    finally:
-        for future in futures:
-            future.cancel()
+    # If a worker process dies, ProcessPoolExecutor enters a BrokenProcessPool
+    # state and every subsequent submit/result call raises. Recreate the pool
+    # and retry once so transient worker death doesn't permanently halt mining.
+    for attempt in range(2):
+        pool = _get_pow_pool()
+        futures: list[Future[int | None]] = []
+        try:
+            for _ in range(NUM_WORKERS):
+                futures.append(
+                    pool.submit(
+                        _grind_nonce_range,
+                        inner_puzzle_hash,
+                        miner_pubkey_bytes,
+                        h_bytes,
+                        difficulty,
+                        random.randint(0, 2**32),
+                        chunk,
+                    )
+                )
+            for future in as_completed(futures):
+                nonce = future.result()
+                if nonce is not None:
+                    return nonce
+            return None
+        except BrokenProcessPool:
+            log.warning("XKV8 nonce search: ProcessPool broken, resetting (attempt %d)", attempt + 1)
+            _reset_pow_pool()
+        finally:
+            for future in futures:
+                future.cancel()
     return None
 
 

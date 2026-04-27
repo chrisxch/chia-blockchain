@@ -3057,6 +3057,7 @@ class FullNode:
                 await self.simulator_transaction_callback(spend_name)
 
         else:
+            broadcasted_xkv8_pending = False
             if (
                 status == MempoolInclusionStatus.PENDING
                 and _should_broadcast_pending_tx_early(
@@ -3066,8 +3067,15 @@ class FullNode:
                 pending_item = self.mempool_manager.get_mempool_item(spend_name, include_pending=True)
                 if pending_item is not None:
                     self.log.info("Broadcasting pending transaction early: %s (%s)", spend_name, error.name)
+                    if len(observed_xkv8_entries) > 0:
+                        broadcasted_xkv8_pending = True
                     await self.broadcast_added_tx(pending_item)
-            self.mempool_manager.remove_seen(spend_name)
+            # For xkv8 PENDING bundles we just early-broadcast, retain the seen-cache
+            # entry so that duplicate arrivals via gossip short-circuit at the seen()
+            # check above instead of re-running pre_validate_spendbundle and
+            # re-broadcasting. Non-xkv8 PENDING bundles preserve original behavior.
+            if not broadcasted_xkv8_pending:
+                self.mempool_manager.remove_seen(spend_name)
             self.log.debug(f"Wasn't able to add transaction with id {spend_name}, status {status} error: {error}")
         return status, error
 
